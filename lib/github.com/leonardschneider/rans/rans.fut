@@ -1,36 +1,35 @@
--- encoder state type
-type State [n] = {
-  sb: u32,
-  freq: [n]u32,
-  cdf: [n]u32,
-  x: u64
+
+module type State = {
+  type State [n]
+  val init [n]: (sb: u32) -> (freq: [n]u32) -> State [n]
+  val sb   [n]: (r: State [n]) -> u32
+  val freq [n]: (r: State [n]) -> i64 -> u32
+  val cdf  [n]: (r: State [n]) -> i64 -> u32
+  val x    [n]: (r: State [n]) -> u64
+  val setx [n]: (r: State [n]) -> u64 -> State [n]
+  val next [n]: (r: State [n]) -> (s: i64) -> State [n]
+  val prev [n]: (r: State [n]) -> (s: i64) -> State [n] 
 }
 
 module type SymbolEncoder = {
-  --type State [n]
-  val init   [n]: (sb: u32) -> (freq: [n]u32) -> State[n]
-  val renorm [n]: (r: State[n]) -> (s: i64) -> bool
-  val write  [n]: (r: State[n]) -> (State[n], u32)
-  val C      [n]: (r: State[n]) -> (s: i64) -> State[n] 
+  type State [n]
+  val renorm [n]: (r: State [n]) -> (s: i64) -> bool
+  val write  [n]: (r: State [n]) -> (State [n], u32)
+  val C      [n]: (r: State [n]) -> (s: i64) -> State [n] 
 }
 
 module type SymbolDecoder = {
-  --type State[n]
-  val init   [n]: (x: u64) -> (sb: u32) -> (freq: *[n]u32) -> State[n]
-  val renorm [n]: (r: State[n]) -> bool
-  val read   [n]: (r: State[n]) -> (g: u32) -> State[n]
-  val D      [n]: (r: State[n]) -> (State[n], i64)
+  type State[n]
+  val renorm [n]: (r: State [n]) -> bool
+  val read   [n]: (r: State [n]) -> (g: u32) -> State [n]
+  val D      [n]: (r: State [n]) -> (State [n], i64)
 }
 
-module type Encoder = {
-  --type State[n]
-  val size   [n][m]: (r: State[n]) -> (msg: [m]i64) -> i64
-  val encode [n][m]: (k: i64) -> (r: State[n]) -> (msg: [m]i64) -> (State[n], [k]u32)
-}
-
-module type Decoder = {
-  --type State[n]
-  val decode [n][m]: (k: i64) -> (r: State[n]) -> (enc: [m]u32) -> (State[n], [k]i64)
+module type Codec = {
+  type State [n]
+  val size   [n][m]: (r: State [n]) -> (msg: [m]i64) -> i64
+  val encode [n][m]: (k: i64) -> (r: State [n]) -> (msg: [m]i64) -> (State [n], [k]u32)
+  val decode [n][m]: (k: i64) -> (r: State [n]) -> (enc: [m]u32) -> (State [n], [k]i64)
 }
 
 let L: u64 = (1 << 31)
@@ -64,82 +63,102 @@ entry freqrenorm [n](sb: u32)(freq: [n]u32): [n]u32 =
       let freq = map (+1) freq
       in freq
 
-def init [n](x: u64)(sb: u32)(freq: [n]u32): State [n] =
-  -- sum of freqs must be 1 << sb
-  -- renormalize accordingly
-  let nfreq = freqrenorm sb freq
-  in {sb=sb, freq=nfreq, cdf=(cdf nfreq), x=x}
+module MkSymbolEncoder(S: State): SymbolEncoder with State [n] = S.State [n] = {
+  type State [n] = S.State [n]
 
-module SymbolEncoder: SymbolEncoder = {
-  --type State [n] = State [n]
-
-  def init = init L
-
-  def renorm [n](state: State[n])(s: i64): bool =
+  def renorm [n](r: State [n])(s: i64): bool =
     -- check whether the internal state x needs to renomalized
     -- that is, if x, once encoded is such as L <= x < b*L
     -- in this implementation b=32
-    let x = state.x
-    let sb = u64.u32 state.sb
-    let freq = u64.u32 state.freq[s]
+    let x = S.x r
+    let sb = u64.u32 (S.sb r)
+    let freq = u64.u32 (S.freq r s)
     let x_max = ((L >> sb) << 32) * freq
     in x >= x_max
 
-  def write [n](state: State[n]): (State[n], u32) =
-    let x = state.x
-    in (state with x = x >> 32, u32.u64 x)
+  def write [n](r: State [n]): (State [n], u32) =
+    let x = S.x r
+    in (S.setx r (x >> 32), u32.u64 x)
 
-  def C [n](state: State[n])(s: i64): State[n] =
+  def C [n](r: State [n])(s: i64): State [n] =
     -- encode a symbol and update state
     -- init
-    let x = state.x
-    let sb = u64.u32 state.sb
-    let cdf = u64.u32 state.cdf[s]
-    let freq = u64.u32 state.freq[s]
+    let x = S.x r
+    let sb = u64.u32 (S.sb r)
+    let cdf = u64.u32 (S.cdf r s)
+    let freq = u64.u32 (S.freq r s)
     -- state update
     let x = ((x / freq) << sb) + (x % freq) + cdf
-    in state with x = x
+    in S.setx r x
 
 }
 
-module SymbolDecoder: SymbolDecoder = {
-  --type State [n] = State [n]
+module MkSymbolDecoder(S: State): SymbolDecoder with State [n] = S.State[n] = {
+  type State [n] = S.State [n]
 
   def init = init
 
-  def D [n](state: State[n]): (State[n], i64) =
+  def D 't [n](r: State [n]): (State [n], i64) =
     -- decode a symbol
-    let x = state.x
-    let sb = u64.u32 state.sb
+    let x = S.x r
+    let sb = u64.u32 (S.sb r)
     -- optimization for: y = x % (1 << sb)
     let mask = (1 << sb) - 1
     let y = u32.u64 (x & mask)
     let i =
-      state.cdf
+      iota n
+        |> map (S.cdf r)
         |> map (<=y)
         |> map i64.bool
         |> reduce (+) 0
     -- s is such that cdf[s] <= y < cdf[s+1]
     let s = i - 1
     -- update decoder state
-    let freq = u64.u32 state.freq[s]
-    let cdf = u64.u32 state.cdf[s]
+    let freq = u64.u32 (S.freq r s)
+    let cdf = u64.u32 (S.cdf r s)
     let x = freq * (x >> sb) + (x & mask) - cdf
     in
-      (state with x = x, s)
+      (S.setx r x, s)
 
-  def renorm [n](state: State[n]): bool =
-    state.x < L
+  def renorm [n](r: State [n]): bool =
+    (S.x r) < L
 
-  def read [n](state: State[n])(enc0: u32): State[n] = 
-    let x = state.x
+  def read [n](r: State [n])(enc0: u32): State [n] = 
+    let x = S.x r
     let x = (x << 32) | (u64.u32 enc0)
-    in state with x = x
+    in S.setx r x
 
 }
 
-module MkEncoder(C: SymbolEncoder): Encoder = {
-  --type State [n] = C.State [n]
+module State: State = {
+  type State [n] = {
+    x: u64,
+    sb: u32,
+    freq: [n]u32,
+    cdf: [n]u32
+  }
+
+  def init [n](sb: u32)(freq: [n]u32): State [n] =
+    -- sum of freqs must be 1 << sb
+    -- renormalize accordingly
+    let nfreq = freqrenorm sb freq
+    in {sb=sb, freq=nfreq, cdf=(cdf nfreq), x = L}
+
+  def x    [n](r: State [n]): u64 = r.x
+  def sb   [n](r: State [n]): u32 = r.sb
+  def freq [n](r: State [n])(i: i64): u32 = r.freq[i]
+  def cdf  [n](r: State [n])(i: i64): u32 = r.cdf[i]
+  def setx [n](r: State [n])(x: u64): State [n] = r with x = x
+
+  def next = \r _ -> r
+  def prev = \r _ -> r
+}
+
+module MkCodec
+  (S: State)
+  (C: SymbolEncoder with State [n] = S.State [n])
+  (D: SymbolDecoder with State [n] = S.State [n]): Codec with State [n] = S.State [n] = {
+  type State [n] = S.State [n]
 
   def size [n][m](r: State [n])(msg: [m]i64): i64 =
     -- calculate encoded message size
@@ -157,7 +176,7 @@ module MkEncoder(C: SymbolEncoder): Encoder = {
         in (r, j)
     in j
 
-  def encode [n][m](k: i64)(r: State [n])(msg: [m]i64): (State[n], [k]u32) =
+  def encode [n][m](k: i64)(r: State [n])(msg: [m]i64): (State [n], [k]u32) =
     -- encode get value
     let j = 0
     let enc = replicate k 0
@@ -175,12 +194,7 @@ module MkEncoder(C: SymbolEncoder): Encoder = {
         in (r, j, enc)
     in (r, enc)
 
-}
-
-module MkDecoder(D: SymbolDecoder): Decoder = {
-  --type State [n] = D.State[n]
-
-  def decode [n][m](k: i64)(r: State[n])(enc: [m]u32): (State[n], [k]i64) =
+  def decode [n][m](k: i64)(r: State [n])(enc: [m]u32): (State [n], [k]i64) =
     let msg = replicate k 0
     let i = 0 -- input index
     let (r, _, msg) =
@@ -200,17 +214,20 @@ module MkDecoder(D: SymbolDecoder): Decoder = {
 
 -- entry points
 
+module SymbolEncoder = MkSymbolEncoder State
+
 -- Symbol encoder
-entry encinit [n](sb: u32)(freq: [n]u32): State[n] = SymbolEncoder.init sb freq
-entry encrenorm [n](r: State[n])(s: i64): bool = SymbolEncoder.renorm r s
-entry encwrite [n](r: State[n]): (State[n], u32) = SymbolEncoder.write r
-entry C [n](r: State[n])(s: i64): State[n] = SymbolEncoder.C r s
+entry encinit [n](sb: u32)(freq: [n]u32): State.State [n] = State.init sb freq
+entry encrenorm [n](r: State.State [n])(s: i64): bool = SymbolEncoder.renorm r s
+entry encwrite [n](r: State.State [n]): (State.State [n], u32) = SymbolEncoder.write r
+entry C [n](r: State.State [n])(s: i64): State.State [n] = SymbolEncoder.C r s
+
+module SymbolDecoder = MkSymbolDecoder State
 
 -- Symbol decoder
-entry decinit [n](x: u64)(sb: u32)(freq: *[n]u32): State[n] = SymbolDecoder.init x sb freq
-entry decrenorm [n](r: State[n]): bool = SymbolDecoder.renorm r
-entry decread [n](r: State[n])(g: u32): State[n] = SymbolDecoder.read r g
-entry D [n](r: State[n]): (State[n], i64) = SymbolDecoder.D r
+entry decrenorm [n](r: State.State [n]): bool = SymbolDecoder.renorm r
+entry decread [n](r: State.State [n])(g: u32): State.State [n] = SymbolDecoder.read r g
+entry D [n](r: State.State [n]): (State.State [n], i64) = SymbolDecoder.D r
 
 
 -- High level byte-level encoder and decoders
@@ -219,15 +236,13 @@ entry mksym8 [n](msg: [n]u8): [256]u32 =
   -- calculate byte symbol freqs from message
   reduce_by_index (replicate 256 0u32) (+) 0 (map i64.u8 msg) (replicate n 1u32)
 
--- Encoder
-module Encoder = MkEncoder SymbolEncoder
-entry size8 [n][m](r: State[n])(msg: [m]u8): i64 = Encoder.size r (map i64.u8 msg)
-entry encode8 [n][m](k: i64)(r: State[n])(msg: [m]u8): (State[n], [k]u32) = Encoder.encode k r (map i64.u8 msg)
-
--- Decoder
-module Decoder = MkDecoder SymbolDecoder
-entry decode8 [n][m](k: i64)(r: State[n])(enc: [m]u32): (State[n], [k]u8) =
-  let (r, msg) = Decoder.decode k r enc
+-- Base Encoder/Decoder
+module BaseCodec = MkCodec State SymbolEncoder SymbolDecoder
+entry size8 [n][m](r: State.State [n])(msg: [m]u8): i64 =
+  BaseCodec.size r (map i64.u8 msg)
+entry encode8 [n][m](k: i64)(r: State.State [n])(msg: [m]u8): (State.State [n], [k]u32) =
+  BaseCodec.encode k r (map i64.u8 msg)
+entry decode8 [n][m](k: i64)(r: State.State [n])(enc: [m]u32): (State.State [n], [k]u8) =
+  let (r, msg) = BaseCodec.decode k r enc
   let msg = map u8.i64 msg
   in (r, msg)
-
