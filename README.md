@@ -1,4 +1,4 @@
-# A Futhark Implementation of rANS
+# A Futhark Implementation of rANS [![CI](https://github.com/leonardschneider/rans/workflows/CI/badge.svg)](https://github.com/leonardschneider/rans/actions)
 
 A simple implementation of rANS (range [Asymmetric Numeral System](https://en.wikipedia.org/wiki/Asymmetric_numeral_systems)) in Futhark.
 
